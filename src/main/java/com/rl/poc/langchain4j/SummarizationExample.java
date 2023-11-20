@@ -4,9 +4,14 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 import org.apache.commons.collections4.CollectionUtils;
@@ -63,7 +68,15 @@ public class SummarizationExample {
 		Document document = FileSystemDocumentLoader.loadDocument(toPath("/data/paul_graham_startupideas.txt"));
 
 		List<TextSegment> segments = splitDocument(document, OPEN_AI_TOKENIZER);
-		System.out.println(summarizeDocument(segments));
+
+		ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
+		try {
+			System.out.println(summarizeDocument(segments, executorService));
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		} finally {
+			executorService.shutdown();
+		}
 
 		askQuestionBasedOnDocument(segments);
 	}
@@ -107,7 +120,7 @@ public class SummarizationExample {
 	}
 
 	// recursively reduce the document segments to one shorter summary.
-	private static String summarizeDocument(List<TextSegment> segments) {
+	private static String summarizeDocument(List<TextSegment> segments, ExecutorService executorService) throws InterruptedException {
 		if (CollectionUtils.isEmpty(segments)) {
 			throw new IllegalArgumentException("No text segments provided, can not summarize the document.");
 		}
@@ -116,13 +129,21 @@ public class SummarizationExample {
 			return getSummarization(segments.get(0));
 		}
 
-		List<String> summarizations = segments.stream().map(SummarizationExample::getSummarization).toList();
+		List<Callable<String>> callables = segments.stream().map(segment -> (Callable<String>) (() -> SummarizationExample.getSummarization(segment))).toList();
+		List<String> summarizations = new ArrayList<>();
+		for(var future : executorService.invokeAll(callables)) {
+			try {
+				summarizations.add(future.get());
+			} catch (ExecutionException e) {
+				e.printStackTrace();
+			}
+		}
 
 		if (CollectionUtils.size(summarizations) == 1) {
 			return summarizations.get(0);
 		}
 
-		return summarizeDocument(splitDocument(new Document(String.join("\n", summarizations), new Metadata()), OPEN_AI_TOKENIZER));
+		return summarizeDocument(splitDocument(new Document(String.join("\n", summarizations), new Metadata()), OPEN_AI_TOKENIZER), executorService);
 	}
 
 	private static String getSummarization(final TextSegment segment) {
@@ -134,7 +155,6 @@ public class SummarizationExample {
 
 		// Send the prompt to the chat model
 		String summary = CHAT_LANGUAGE_MODEL.generate(prompt.toUserMessage()).content().text();
-//		String summary = CHAT_LANGUAGE_MODEL.generate(prompt).content();
 		System.out.println(" Partial summary: " + summary);
 		return summary;
 	}
